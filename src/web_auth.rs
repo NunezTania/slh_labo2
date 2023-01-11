@@ -1,8 +1,7 @@
 use crate::db::{DbConn, save_user, user_exists, set_verified, get_user, update_password};
-use crate::models::{
-    AppState, LoginRequest, OAuthRedirect, PasswordUpdateRequest, RegisterRequest,
-};
+use crate::models::{AppState, LoginRequest, OAuthRedirect, PasswordUpdateRequest, RegisterRequest};
 use crate::user::{AuthenticationMethod, User, UserDTO};
+use serde::{Deserialize, Serialize};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -22,7 +21,6 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum_sessions::async_session::chrono::Utc;
-use serde::{Deserialize, Serialize};
 use oauth2::{AuthorizationCode, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, Scope};
 use oauth2::reqwest::async_http_client;
 use crate::oauth::get_google_oauth_email;
@@ -109,7 +107,7 @@ async fn register(
         return Err(AuthResult::PasswordsDontMatch.into_response());
     }
 
-    // Verifier la longueur du mot de passe
+    // Verifier la longueur du mot de passe (entre 8 et 64 caractères)
     let length = password_slice.chars().count();
     if length < 8 || length > 64 {
         return Err(AuthResult::WrongPasswordLength.into_response());
@@ -123,17 +121,17 @@ async fn register(
         return Err(AuthResult::WeakPassword.into_response());
     }
 
-    // Vérifie que le user n'existe pas déjà
-    match user_exists(&mut _conn, email_slice) {
-        Ok(_) => return Err(AuthResult::UserAlreadyExists.into_response()),
-        Err(_) => {}
-    }
-
     // Hash le mot de passe avec du sel
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     let hash = argon2.hash_password(_password.as_ref(), salt.as_ref())
         .or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
+
+    // Vérifie que le user n'existe pas déjà
+    match user_exists(&mut _conn, email_slice) {
+        Ok(_) => return Err(AuthResult::UserAlreadyExists.into_response()),
+        Err(_) => {}
+    }
 
     // Créer le user
     let user = User::new(email_slice, hash.to_string().as_str(), AuthenticationMethod::Password, false);
@@ -153,10 +151,11 @@ async fn register(
     url_escape::encode_component_to_string(session_id.unwrap(), &mut verification_link);
     send_verification_mail(email_slice, &verification_link);
 
-    Ok(AuthResult::Success)
+    return Ok(AuthResult::Success);
 }
 
 fn send_verification_mail(email : &str, verification_link : &str) {
+
     let verification_email = Message::builder()
         .from("noreply@localhost".parse().unwrap())
         .to(email.clone().parse().unwrap())
@@ -166,6 +165,8 @@ fn send_verification_mail(email : &str, verification_link : &str) {
 
     let creds = Credentials::new(env::var("SMTP_USERNAME").unwrap().to_string(),
                                  env::var("SMTP_PASSWORD").unwrap().to_string());
+    // Ici nous utilisons une configuration pour utiliser mailtrap d'où l'utilisation de builder_dangerous
+    // Toute la configuration inhérente à l'envoi du mail se trouve dans le fichier .env
     let mailer = SmtpTransport::builder_dangerous(env::var("SMTP_HOST").unwrap().as_str())
         .credentials(creds)
         .port(env::var("SMTP_PORT").unwrap().parse::<u16>().expect("SMTP_PORT must be a number"))
@@ -177,12 +178,14 @@ fn send_verification_mail(email : &str, verification_link : &str) {
     }
 }
 
-// TODO: Create the endpoint for the email verification function. DONE A TESTER
+// TODO: Create the endpoint for the email verification function.
 async fn verify(
     mut _conn: DbConn,
     State(_session_store): State<MemoryStore>,
     Path(session_id_encoded) : Path<String>
 ) -> Redirect {
+    // Récupération de l'id de session dans laquelle nous avons précédemment mis l'email (via le
+    // Path du lien de vérification)
     let session_id = url_escape::decode(session_id_encoded.as_str()).to_string();
     let session = match get_session(&session_id, &_session_store).await {
         Some(s) => s,
@@ -215,6 +218,7 @@ async fn google_oauth(
     //       random challenge and a CSRF token. In order to get the email address of
     //       the user, use the following scope: https://www.googleapis.com/auth/userinfo.email
     //       Use Redirect::to(url) to redirect the user to Google's authentication form.
+
 
     let client = &crate::oauth::OAUTH_CLIENT;
 
@@ -263,6 +267,8 @@ async fn oauth_redirect(
     let session_id = jar.get("session_id").unwrap().value().to_string();
     let csrf_token_param = _params.state.clone();
 
+    // If you need to recover data between requests, you may use the session_store to load a session
+    // based on a session_id.
     let session = match get_session(&session_id, &_session_store).await {
         Some(s) => s,
         None => return Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -288,12 +294,12 @@ async fn oauth_redirect(
         .set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier))
         .request_async(async_http_client)
         .await {
-        Ok(token) => token,
-        Err(err) => {
-            println!("Error: {}", err);
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-    };
+                    Ok(token) => token,
+                    Err(err) => {
+                        println!("Error: {}", err);
+                        return Err(StatusCode::UNAUTHORIZED);
+                    }
+        };
 
     let email = match get_google_oauth_email(&token_result).await {
         Ok(email) => email,
@@ -303,12 +309,13 @@ async fn oauth_redirect(
         }
     };
 
-    // If you need to recover data between requests, you may use the session_store to load a session
-    // based on a session_id.
-
 
     // Once the OAuth user is authenticated, create the user in the DB and add a JWT cookie
     let user = User::new(email.as_str(), "",AuthenticationMethod::OAuth, true);
+    match user_exists(&mut _conn, user.email.as_str()) {
+        Ok(_) => return Err(StatusCode::BAD_REQUEST),
+        Err(_) => {}
+    }
     match save_user(&mut _conn, user.clone()) {
         Ok(_) => println!("User saved"),
         Err(e) => println!("Could not save user: {}", e),
@@ -342,7 +349,22 @@ async fn password_update(
             // Vérifier que le mot de passe est correct
             Argon2::default().verify_password(_password.as_str().as_ref(), &hashed_pwd)
                 .or(Err(AuthResult::InvalidCredentials.into_response()))?;
+
             // Changer le mot de passe
+
+            // Verifier la longueur du mot de passe (entre 8 et 64 caractères)
+            let length = _password.as_str().chars().count();
+            if length < 8 || length > 64 {
+                return Err(AuthResult::WrongPasswordLength.into_response());
+            }
+
+            // Vérifier la force du mot de passe
+            let strength = zxcvbn::zxcvbn(_password.as_str(), &[_user.email.as_str()])
+                .or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
+
+            if strength.score() < 3 {
+                return Err(AuthResult::WeakPassword.into_response());
+            }
             let salt = SaltString::generate(&mut OsRng);
             let argon2 = Argon2::default();
             let hash = argon2.hash_password(_new_password.as_ref(), salt.as_ref())

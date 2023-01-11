@@ -56,5 +56,3 @@ pub struct OAuthRedirect {
     pub state: String,
     pub code: String,
 }
-
-

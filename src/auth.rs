@@ -30,8 +30,10 @@ where
             .await
             .expect("Could not get CookieJar from request parts");
         let _jwt = jar.get("auth").ok_or(Redirect::to(REDIRECT_URL))?.value();
-        let secret = env::var("SECRET_KEY").expect("SECRET must be set");
 
+        let secret = env::var("SECRET_KEY").expect("SECRET must be set");
+        // Décodage du token à l'aide de la struct JWTPayload pour avoir un champs sub et exp
+        // Si ces derniers ne sont pas présent dans la struct, une erreur se produit
         match decode::<JWTPayload>(&_jwt,
                                    &DecodingKey::from_secret(secret.as_ref()),
                                    &Validation::default()) {
