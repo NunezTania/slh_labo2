@@ -94,7 +94,7 @@ async fn register(
     Json(register): Json<RegisterRequest>,
 ) -> Result<AuthResult, Response> {
     // TODO: Implement the register function. The email must be verified by sending a link.
-    //       You can use the functions inside db.rs to add a new user to the DB. DONE A TESTER
+    //       You can use the functions inside db.rs to add a new user to the DB.
     let _email = register.register_email;
     let _password = register.register_password;
     let _password2 = register.register_password2;
